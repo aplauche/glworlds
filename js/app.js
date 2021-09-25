@@ -8,6 +8,12 @@ import gsap from 'gsap'
 
 import fragment from '../shaders/fragment.glsl'
 import vertex from '../shaders/vertex.glsl'
+import noise from '../shaders/noise.glsl'
+
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
 import ocean from '../img/ocean.jpg'
 
@@ -33,7 +39,7 @@ export default class Sketch {
 		this.camera.fov = Math.atan((this.height/2) / 600 ) * 2 * (180/Math.PI) 
 
 
-		this.renderer = new THREE.WebGLRenderer( { antialias: true } );
+		this.renderer = new THREE.WebGLRenderer( { antialias: false, alpha: true } );
 		this.renderer.setSize( this.width, this.height );
 		this.dom.appendChild( this.renderer.domElement );
 		this.renderer.setClearColor('#fff')
@@ -73,11 +79,69 @@ export default class Sketch {
 			this.resize()
 			this.addListeners()
 			this.addObject()
+			this.composerPass()
 			this.render()
 
 		})
 
 	}
+	composerPass(){
+		this.composer = new EffectComposer(this.renderer);
+		this.renderPass = new RenderPass(this.scene, this.camera);
+		this.composer.addPass(this.renderPass);
+  
+		//custom shader pass
+		var counter = 0.0;
+		this.myEffect = {
+		  uniforms: {
+			"tDiffuse": { value: null },
+			"scrollSpeed": { value: null },
+			"time": { value: null },
+		  },
+		  vertexShader: `
+		  varying vec2 vUv;
+		  void main() {
+			vUv = uv;
+			gl_Position = projectionMatrix 
+			  * modelViewMatrix 
+			  * vec4( position, 1.0 );
+		  }
+		  `,
+		  fragmentShader: `
+		  uniform sampler2D tDiffuse;
+		  varying vec2 vUv;
+		  uniform float scrollSpeed;
+		  uniform float time;
+		  ${noise}
+		  void main(){
+			vec2 fullDistortUV = vUv;
+			vec2 halfDistortUV = vUv;
+			float area = smoothstep(0.25, 0.,vUv.y);
+			float maskArea = smoothstep(1., 0.6,vUv.y) * 2. -1.;
+
+			float noise = 0.5 * (cnoise(vec3(vUv*5., time/5.)) + 1.);
+			float crispNoise = smoothstep(0.5, 0.5, noise + maskArea);
+
+			fullDistortUV.x -= (vUv.x - 0.5) * 0.5 * area * scrollSpeed;
+			halfDistortUV.x += (vUv.x - 0.5) * 0.3 * area * scrollSpeed;
+
+			vec4 distort = texture2D( tDiffuse, fullDistortUV);
+			vec4 halfDistort = texture2D( tDiffuse, halfDistortUV);
+			vec4 textureNormal = texture2D( tDiffuse, vUv);
+
+			vec4 imageTexture = vec4(distort.r, halfDistort.g, textureNormal.b, 1);
+			gl_FragColor = mix(vec4(1.), imageTexture, crispNoise);
+
+		  }
+		  `
+		}
+  
+		this.customPass = new ShaderPass(this.myEffect);
+		this.customPass.renderToScreen = true;
+  
+		this.composer.addPass(this.customPass);
+	  }
+	  
 
 	addListeners(){
 		window.addEventListener('resize', this.resize.bind(this))
@@ -99,10 +163,20 @@ export default class Sketch {
 		}
 	}
 
-
 	resize(){
 		this.width = this.dom.offsetWidth
 		this.height = this.dom.offsetHeight
+
+		this.imageStore.forEach(obj => {
+			let bounds = obj.img.getBoundingClientRect()
+			
+			obj.top = bounds.top + this.scroll.scrollToRender,
+			obj.left = bounds.left,
+			obj.width = bounds.width,
+			obj.height = bounds.height
+	
+		})
+		
 		this.renderer.setSize( this.width, this.height );
 		this.camera.aspect = this.width / this.height
 		this.camera.updateProjectionMatrix()
@@ -116,7 +190,7 @@ export default class Sketch {
 		this.imageStore = this.images.map(img => {
 			let bounds = img.getBoundingClientRect()
 			
-			let geometry = new THREE.PlaneGeometry(bounds.width, bounds.height, 100, 100)
+			let geometry = new THREE.PlaneGeometry(1,1, 100, 100)
 			let texture = new THREE.Texture(img)
 			texture.needsUpdate = true
 			let material = new ShaderMaterial({
@@ -139,6 +213,9 @@ export default class Sketch {
 				geometry,
 				material
 			)
+
+			mesh.scale.set(bounds.width, bounds.height)
+
 			this.scene.add(mesh)
 
 			img.addEventListener('mouseenter', ()=>{
@@ -170,8 +247,11 @@ export default class Sketch {
 	setImgPositions(){
 		this.imageStore.forEach(obj => {
 			// shift the coordinate from left top dom to center center of web gl
-			obj.mesh.position.y = - obj.top + this.height/2 - obj.height/2 + this.currentScroll
+			obj.mesh.scale.set(obj.width, obj.height)
+			obj.mesh.position.y = - obj.top + this.height/2 - obj.height/2 + this.scroll.scrollToRender
 			obj.mesh.position.x = obj.left - (this.width /2) + obj.width/2
+
+			
 		})
 	}
 
@@ -201,8 +281,10 @@ export default class Sketch {
 		this.setImgPositions()
 		// this.mesh.rotation.x = this.time / 50;
 		// this.mesh.rotation.y = this.time / 50;
+		this.customPass.uniforms.scrollSpeed.value = this.scroll.speedTarget
+		this.customPass.uniforms.time.value = this.time
 	
-		this.renderer.render( this.scene, this.camera );
+		this.composer.render();
 		window.requestAnimationFrame(this.render.bind(this))
 		// this.material.uniforms.time.value = this.time
 
